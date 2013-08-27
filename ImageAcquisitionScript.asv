@@ -1,0 +1,304 @@
+warning('off','stats:nlinfit:Overparameterized')
+warning('off','MATLAB:Axes:NegativeDataInLogAxis')
+wrnst = warning('off','all'); % suppress unimportant camera warnings
+
+% Create DragonFly2 Object, if it doesn't exist
+if ~exist('camera','var') || ~isvalid(camera)
+    camera = videoinput('dcam',hfig_main.camera.camera,hfig_main.camera.cameraMode);
+    cameradsp = getselectedsource(camera);
+    
+    camera.framespertrigger = 1;
+    camera.TriggerRepeat = 3;
+    triggerconfig(camera,'hardware','fallingedge','externalTriggerMode1-Source0')
+    
+    cameradsp.ShutterMode = 'manual';
+    cameradsp.ShutterControl = 'absolute';
+    cameradsp.ShutterAbsolute = .003;
+    cameradsp.GainMode = 'manual';
+    cameradsp.GainControl = 'absolute';
+    cameradsp.GainAbsolute = 0;
+    cameradsp.BrightnessControl = 'absolute';
+    cameradsp.BrightnessAbsolute = 0;
+    cameradsp.SharpnessMode = 'manual';
+    cameradsp.Sharpness = 0;
+    cameradsp.IrisMode = 'manual';
+    cameradsp.Iris = 256;
+    cameradsp.FrameTimeout = 1;
+    
+    start(camera) %First initialization sometimes requires two starts
+    stop(camera)
+end
+
+% Initialize camera
+start(camera)
+boxdisp('Imaging Started',hfig_main.user.boxdispsize)
+
+%% Grab 4 images; first is dummy image to clean CCD; last three are absorption images
+CalledStop = 0;
+CurrentFrame = 0;
+while CurrentFrame < 4
+    drawnow
+    % Return if "Stop" is pressed
+    if hfig_main.user.run == 0
+        delete(imaqfind)
+        boxdisp('Imaging Stopped',hfig_main.user.boxdispsize)
+        disp(' ')
+        return
+    end
+    if get(hfig_dispCombined.refit_btn,'userdata')
+        delete(imaqfind)
+        boxdisp('Refitting Image',hfig_main.user.boxdispsize)
+        hfig_main.user.run = hfig_main.prevState;
+        break
+    end
+    if get(hfig_main.sl_load,'userdata')
+        delete(imaqfind)
+        boxdisp('Loading Image',hfig_main.user.boxdispsize)
+        break
+    end
+    % Check if image timing is correct, reset camera if image is missing
+    if CurrentFrame > 0 && toc > hfig_main.user.triggerWait % Imaging has 200 ms spacing, but sometimes last image appears ~360 ms
+        triggers = camera.FramesAcquired;
+        stop(camera)
+        start(camera)
+        disp(['TRIGGERED ' num2str(triggers) ' TIMES'])
+        boxdisp('Reseting Camera',44)
+        CurrentFrame = 0;
+    end
+    % Report image grabbed successfully
+    if camera.FramesAcquired > CurrentFrame
+        disp(['TRIGGERED IMAGE ' num2str(CurrentFrame) ', ' num2str(toc) ' s'])
+        CurrentFrame = camera.FramesAcquired;
+        tic
+    end
+    if CurrentFrame == 4
+        fileattrib(get(hfig_main.etxt_rdf,'string'),'-w');
+        runData = [];
+        runData = load(get(hfig_main.etxt_rdf,'string'));
+        fileattrib(get(hfig_main.etxt_rdf,'string'),'+w');
+    end
+end
+
+%Prepare image
+if ~get(hfig_dispCombined.refit_btn,'userdata') && ~get(hfig_main.sl_load,'userdata')
+    rawImage = [];
+    flushdata(camera,'triggers'); % remove dummy image (deletes oldest trigger)
+    rawImage = getdata(camera,3); % get 3 images
+    flushdata(camera); % clear camera memory, probably unnecessary
+    rawImage = squeeze(rawImage);
+end
+
+if get(hfig_main.sl_load,'userdata')
+    cdir = cd(get(hfig_main.sl_folder,'string'));
+    [filename,pathname] = uigetfile('*.mat');
+    cd(cdir)
+    if filename
+        rawload = load(fullfile(pathname,filename));
+        if exist('rawload','var') && isfield(rawload,'rawImage')
+            rawImage = rawload.rawImage;
+            hfig_save = hfig_main;
+            hfig_main.display = rawload.hfig_main.display;
+            hfig_main.calculation = rawload.hfig_main.calculation;
+            disp(['Loaded ' filename])
+        else
+            disp('Not a valid image GUI file.')
+            set(hfig_main.sl_load,'userdata',0)
+            continue
+        end
+    else
+        disp('No file selected.')
+        set(hfig_main.sl_load,'userdata',0)
+        continue
+    end
+end
+
+ODImg = @(atomImg, lightImg, darkImg,flucCor)...
+    abs(log((double(atomImg) - double(darkImg))./(flucCor*double(lightImg) - double(darkImg))));
+RotateImg = @(img)...
+    double(imrotate(single(img),hfig_main.display.imageRotation,'bilinear'));
+
+dCSize = get(hfig_dispCombined.img_axes,'position');
+if ~all(dCSize([4 3])==hfig_main.display.dispSize)
+    dispCombinedPos = get(hfig_dispCombined.figure,'position');
+    close('dispCombined')
+    eval('dispCombined')
+    set(hfig_dispCombined.refit_btn,'userdata',0)
+    dispCombinedSize = get(hfig_dispCombined.figure,'position');
+    set(hfig_dispCombined.figure, 'Position', [dispCombinedPos(1:2) dispCombinedSize(3:4)]);
+end
+
+if get(hfig_main.rid_on,'value')
+    if isempty(findobj('tag','rawimages'))
+        eval('rawImages')
+    end
+    for i = 1:3
+        rawaxes = ['axes' num2str(i)];
+        image(RotateImg(rawImage(:,:,i))./2^16*64, 'Parent', hfig_rawImages.(rawaxes))
+        rawHeight = hfig_main.display.dispSize(1)*.4;
+        rawWidth = hfig_main.display.dispSize(2)*.4;
+        set(hfig_rawImages.(rawaxes),'XTickLabel',[],'YTickLabel',[],'units','pixels','position',[10 10+(3-i)*(10+rawHeight) rawWidth rawHeight])
+        rawImagePos = get(hfig_rawImages.rawimages,'position');
+        set(hfig_rawImages.rawimages,'position',[rawImagePos(1:2) rawWidth+20 40+rawHeight*3])
+    end
+end
+
+warning(wrnst)
+
+%% Image processing
+intAtom = RotateImg(rawImage(:,:,1));
+intAtom = mean(mean(intAtom(hfig_main.calculation.flucWinY, hfig_main.calculation.flucWinX)));
+
+intLight = RotateImg(rawImage(:,:,2));
+intLight = mean(mean(intLight(hfig_main.calculation.flucWinY, hfig_main.calculation.flucWinX)));
+
+RawProbe = double(max(max(rawImage(:,:,2))));
+probeSat = RawProbe/2^16*100;
+
+% Fluctuation correct
+if get(hfig_main.fc_on,'value')
+    flucCor = intAtom/intLight;
+    display(['FLUC CORR: ' num2str(flucCor)])
+elseif get(hfig_main.fc_off,'value')
+    flucCor = 1;
+    fprintf(1,'FLUC CORR:')
+    fprintf(2,[' OFF (' num2str(intAtom/intLight) ')\n'])
+end
+
+if ~(exist('runData','var') && isfield(runData,'ImagingFlag')) || runData.ImagingFlag
+    ODImgXY = ODImg(rawImage(:,:,1), rawImage(:,:,2), rawImage(:,:,3),flucCor);
+    ODImgXY(isnan(ODImgXY)) = 0;
+    ODImgXY(isinf(ODImgXY)) = max(max(ODImgXY(~isinf(ODImgXY))));
+elseif runData.ImagingFlag==0
+    ODImgXY = double(rawImage(:,:,1) - rawImage(:,:,2));
+end
+ODImgXY = RotateImg(ODImgXY);
+if get(hfig_main.cbox_mlr,'value')
+    ODImgXY = fliplr(ODImgXY);
+end
+drawnow
+
+if get(hfig_main.fwm_con,'value') || get(hfig_main.truncbtn,'userdata')
+    if get(hfig_main.fws_full,'value')
+        factor = 1;
+    else
+        factor = .4;
+    end
+    ROISelectImg = imresize(ODImgXY,factor)/max(max(ODImgXY))*64;
+    [hfig_main.calculation.truncWinY hfig_main.calculation.truncWinX] = roiselect(ROISelectImg,'Fitting/Display Window');
+    hfig_main.calculation.truncWinY = floor(hfig_main.calculation.truncWinY(1)/factor):floor(hfig_main.calculation.truncWinY(end)/factor);
+    hfig_main.calculation.truncWinX = floor(hfig_main.calculation.truncWinX(1)/factor):floor(hfig_main.calculation.truncWinX(end)/factor);
+    set(hfig_main.truncbtn,'userdata',0,'BackgroundColor',hfig_main.user.truncbtn_BackgroundColor)
+end
+
+if get(hfig_main.fluctbtn,'userdata')
+    factor = .4;
+    ROISelectImg = imresize(ODImgXY,.4)/max(max(ODImgXY))*64;
+    [hfig_main.calculation.flucWinY hfig_main.calculation.flucWinX] = roiselect(ROISelectImg,'Fluctuation Monitoring Window');
+    hfig_main.calculation.flucWinY = floor(hfig_main.calculation.flucWinY(1)/factor):floor(hfig_main.calculation.flucWinY(end)/factor);
+    hfig_main.calculation.flucWinX = floor(hfig_main.calculation.flucWinX(1)/factor):floor(hfig_main.calculation.flucWinX(end)/factor);
+    set(hfig_main.fluctbtn,'userdata',0,'BackgroundColor',hfig_main.user.fluctbtn_BackgroundColor)
+end
+YROI = hfig_main.calculation.truncWinY;
+XROI = hfig_main.calculation.truncWinX;
+ODImgROI = ODImgXY(YROI,XROI);
+
+%Replace removed sections with blank image
+ODImgDisp = zeros(hfig_main.display.imageSize);
+ODImgDisp(YROI,XROI) = ODImgROI;
+
+%Display full image
+if get(hfig_main.is_custom,'value')
+    dispMax = str2double(get(hfig_main.is_max,'string'));
+    dispMin = str2double(get(hfig_main.is_min,'string'));
+else
+    dispMax = max(max(ODImgDisp));
+    dispMin = 0;
+end
+ODImgDisp = 64*(ODImgDisp-dispMin)/(dispMax-dispMin);
+xlim = get(hfig_dispCombined.img_axes,'xlim');
+ylim = get(hfig_dispCombined.img_axes,'ylim');
+image(ODImgDisp, 'Parent', hfig_dispCombined.img_axes);
+set(hfig_dispCombined.img_axes,'xlim',xlim,'ylim',ylim);
+set(hfig_dispCombined.figure,'colormap',colormap([linspace(0,0,3)' linspace(0,0,3)' linspace(0,.55,3)'; jet(61)]))
+
+%Calculate maximum
+ODPeak = max(max(ODImgXY));
+strODPeak = sprintf('%.2f', ODPeak);
+strProbeSat = sprintf('%.1f%%', probeSat);
+set(hfig_dispAtomInfo.text_ODPeak, 'String', strODPeak);
+set(hfig_dispAtomInfo.text_probeSat, 'String', strProbeSat);
+
+drawnow
+%% fitting and plotting
+
+if get(hfig_main.nc_nofit,'value')
+    FitFlag = 1;
+elseif get(hfig_main.nc_fitx,'value')
+    FitFlag = 2;
+elseif get(hfig_main.nc_fity,'value')
+    FitFlag = 3;
+elseif get(hfig_main.nc_fitxy,'value')
+    FitFlag = 4;
+end
+
+if get(hfig_main.ft_gaussian,'value')
+    FitType = 1;
+elseif get(hfig_main.ft_gaussian2d,'value')
+    FitType = 1;
+elseif get(hfig_main.ft_gaussianbec1d,'value')
+    FitType = 2;
+end
+
+if get(hfig_main.ft_gaussian,'value') || get(hfig_main.ft_gaussian2d,'value')
+    [N,sx,sy,fp,fp1D] = fitGaussian(ODImgROI,get(hfig_main.ft_gaussian2d,'value'));
+end
+
+fitOD = fp(1);
+strfitOD = sprintf('%.2f', fitOD);
+set(hfig_dispAtomInfo.text_fitOD, 'String', strfitOD);
+
+if get(hfig_main.is_fit,'value')
+    ODImgDisp = 64*(ODImgDisp/64*(dispMax-dispMin)+dispMin-dispMin)/(fitOD-dispMin);
+    xlim = get(hfig_dispCombined.img_axes,'xlim');
+    ylim = get(hfig_dispCombined.img_axes,'ylim');
+    image(ODImgDisp, 'Parent', hfig_dispCombined.img_axes);
+    set(hfig_dispCombined.img_axes,'xlim',xlim,'ylim',ylim);
+    set(hfig_dispCombined.figure,'colormap',colormap([linspace(0,0,3)' linspace(0,0,3)' linspace(0,.55,3)'; jet(61)]))
+end
+
+strN = sprintf('%.2e', N);
+strsx = sprintf('%.2e', sx);
+strsy = sprintf('%.2e', sy);
+
+if exist('runData','var') && isfield(runData,'NumOfTOF') && runData.NumOfTOF > 1
+    if runData.CurrTOFNum==1
+        clear tempInfo
+    end
+    tempInfo(runData.CurrTOFNum,:) = [runData.CurrTOF N sx sy];
+    if runData.CurrTOFNum==runData.NumOfTOF
+        fitTemp(tempInfo)
+    end
+end
+
+drawnow
+if get(hfig_main.numplot_reset,'userdata')
+    set(hfig_dispAtomInfo.info_axes,'NextPlot','replace')
+    set(hfig_main.numplot_reset,'userdata',0)
+    set(hfig_main.npm_run,'userdata',1)
+end
+if get(hfig_main.npm_con,'value')
+    semilogy(hfig_dispAtomInfo.info_axes,runData.CurrContPar,N,'.')
+else
+    npcounter = get(hfig_main.npm_run,'userdata');
+    semilogy(hfig_dispAtomInfo.info_axes,npcounter,N,'.')
+    set(hfig_main.npm_run,'userdata',npcounter+1)
+end
+set(hfig_dispAtomInfo.info_axes,'NextPlot','add')
+
+set(hfig_dispAtomInfo.text_number, 'String', strN);
+set(hfig_dispAtomInfo.text_sigmaX, 'String', strsx);
+set(hfig_dispAtomInfo.text_sigmaY, 'String', strsy);
+
+drawnow
+boxdisp('Imaging Done',hfig_main.user.boxdispsize)
+display(' ')

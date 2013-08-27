@@ -1,0 +1,111 @@
+function [N,sigmax,sigmay,fp,fp1D] = fitGaussian(data,flag2d,ftol)
+global hfig_main hfig_dispCombined
+if nargin < 2
+    flag2d = 0;
+end
+if nargin < 3
+    ftol = 1e-6;
+end
+
+options = optimset('TolFun',ftol,'Display','off','Jacobian','off');
+
+%% initial conditions for fitting
+% major component
+for i=1:2
+    data1D{i} = sum(data,i);
+    A1D(i) = max(max(data1D{i}));
+    x01D(i) = find(data1D{i}==A1D(i),1);
+    sig1D(i) = abs(findvalue(data1D{i},A1D(i)/2) - x01D(i));%,x01D(i)
+    B1D(i) = 0;
+    b1D(i) = 0;
+    beta1D(i,:) = [A1D(i), x01D(i), sig1D(i), B1D(i), b1D(i), 0];
+    fp1D(i,:) = lsqcurvefit(@x_gaussianbec,beta1D(i,:),data1D{i},data1D{i},[0 0 0 0 0 -inf],[inf inf inf inf inf inf],options);
+    fit1D{i} = x_gaussianbec(fp1D(i,:),data1D{i});
+    thermal1D{i} = x_gaussian([fp1D(i,1:3) fp1D(i,6)],data1D{i});
+end
+
+x0 = fp1D(1,2);
+y0 = fp1D(2,2);
+
+sigmax = fp1D(1,3);
+sigmay = fp1D(2,3);
+
+peaky = round(y0-sigmay/4):round(y0+sigmay/4);
+peaky = peaky(peaky>0 & peaky<length(data1D{2}));
+
+peakx = round(x0-sigmax/4):round(x0+sigmax/4);
+peakx = peakx(peakx>0 & peakx<length(data1D{1}));
+peak = data(peaky,peakx);
+A = mean(mean(peak));
+if isnan(A)
+    A = max(max(data));
+end
+
+Bx = fp1D(1,4);
+By = fp1D(2,4);
+
+bx = fp1D(1,5);
+by = fp1D(2,5);
+
+c = mean([fp1D(1,6)/numel(data1D{2}) fp1D(2,6)/numel(data1D{1})]);
+
+fp = [A x0 y0 sigmax sigmay Bx By bx by c 0];
+
+% xl = x0 + hfig_main.calculation.truncWinX(1);
+% yl = y0 + hfig_main.calculation.truncWinY(1);
+% l1 = [xl+sigmax, xl-sigmax; yl, yl];
+% l2 = [xl, xl; yl+sigmay, yl-sigmay];
+% cstr = '-m';
+% 
+% if get(hfig_main.ft_gaussian2d,'value')
+%     fp = lsqcurvefit(@xy_gaussian, fp, data, data,[0 0 0 0 0 0 -pi/2],[inf inf inf inf inf inf pi/2],options);
+%     fit2D = xy_gaussian(fp,data);
+%     fit1D{1} = sum(fit2D,1);
+%     fit1D{2} = sum(fit2D,2);
+%     sigmax = fp(4);
+%     sigmay = fp(5);
+%     theta = fp(7);
+%     l1 = [xl+sigmax*cos(theta) xl-sigmax*cos(theta); yl+sigmax*sin(theta) yl-sigmax*sin(theta)];
+%     l2 = [xl+sigmay*sin(theta) xl-sigmax*sin(theta); yl-sigmay*cos(theta) yl+sigmay*cos(theta)];
+%     cstr = '-g';
+% end
+
+sigmax = sigmax*hfig_main.calculation.c1;
+sigmay = sigmay*hfig_main.calculation.c1;
+
+%% calculate N
+if get(hfig_main.nc_nofit,'value')
+    N = hfig_main.calculation.A/hfig_main.calculation.s_lambda*sum(sum(data));
+elseif get(hfig_main.nc_fitx,'value')
+    N = hfig_main.calculation.A/hfig_main.calculation.s_lambda*(sum(sum(data))-fp1D(1,6)*numel(data1D{1}));
+elseif get(hfig_main.nc_fity,'value')
+    N = hfig_main.calculation.A/hfig_main.calculation.s_lambda*(sum(sum(data))-fp1D(2,6)*numel(data1D{2}));
+elseif get(hfig_main.nc_fitxy,'value')
+    N = hfig_main.calculation.A/hfig_main.calculation.s_lambda*sum(sum(data-c));
+end
+
+% if get(hfig_main.ft_gaussian2d,'value') && ~get(hfig_main.nc_nofit,'value')
+%     N = hfig_main.calculation.A/hfig_main.calculation.s_lambda*sum(sum(data-fp(6)));
+% end
+%% plotting
+x = ((1:length(data1D{1})) + hfig_main.calculation.truncWinX(1))*hfig_main.calculation.c1*1000;
+y = (fliplr(1:length(data1D{2})) + hfig_main.display.imageSize(1) - hfig_main.calculation.truncWinY(length(hfig_main.calculation.truncWinY)))*hfig_main.calculation.c1*1000;
+
+plot(hfig_dispCombined.xden_axes, x, data1D{1}/A1D(1), '.b', x, fit1D{1}/A1D(1), '-r', x, thermal1D{1}/A1D(1), '-g','LineWidth',2)
+plot(hfig_dispCombined.yden_axes, data1D{2}/A1D(2), y, '.b', fit1D{2}/A1D(2), y, '-r', thermal1D{2}/A1D(2), y, '-g','LineWidth',2)
+% if get(hfig_main.fad_on,'value')
+%     set(hfig_dispCombined.img_axes,'NextPlot','add')
+%     plot(hfig_dispCombined.img_axes,l1(1,:),l1(2,:),cstr,'LineWidth',2)
+%     plot(hfig_dispCombined.img_axes,l2(1,:),l2(2,:),cstr,'LineWidth',2)
+% end
+
+%set axes
+xlim = get(hfig_dispCombined.xden_axes,'XLim');
+axis(hfig_dispCombined.xden_axes,'tight')
+ylim = get(hfig_dispCombined.xden_axes,'YLim');
+set(hfig_dispCombined.xden_axes,'XLim',xlim,'YLim',[0 ylim(2)])
+
+ylim = get(hfig_dispCombined.yden_axes,'YLim');
+axis(hfig_dispCombined.yden_axes,'tight')
+xlim = get(hfig_dispCombined.yden_axes,'XLim');
+set(hfig_dispCombined.yden_axes,'YLim',ylim,'XLim',[0 xlim(2)])
